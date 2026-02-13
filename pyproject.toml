@@ -5,7 +5,7 @@ description = "Transcribe speech to IPA with Whisper"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi[standard]>=0.129.0",
+    "fastapi>=0.129.0",
     "numpy>=2.3.5",
     "python-multipart>=0.0.22",
     "scipy>=1.17.0",
@@ -14,14 +14,17 @@ dependencies = [
     "transformers>=5.1.0",
 ]
 
-[tool.uv]
-# Reduce memory during uv sync / install (torch, transformers, scipy, etc.)
-concurrent-builds = 1
-concurrent-downloads = 4
-concurrent-installs = 2
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = [
+    "fastapi[standard]>=0.129.0",
     "ipykernel>=7.2.0",
     "iprogress>=0.4",
 ]
