@@ -4,18 +4,12 @@ import tempfile
 
 import numpy as np
 import soundfile as sf
+import torch
 from fastapi import FastAPI, UploadFile, HTTPException, Request
 from scipy.signal import resample_poly
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-app = FastAPI()
-
-processor = None
-model = None
-_load_lock = asyncio.Lock()
-
-# Vercel request body limit is 4.5 MB (https://vercel.com/docs/functions/limitations)
-MAX_FILE_SIZE = int(4.5 * 1024 * 1024)
+MAX_FILE_SIZE = int(4.5 * 1024 * 1024) # 4.5 MB (Vercel functions limit)
 MAX_AUDIO_LENGTH = 10
 
 MODEL_ID = "neurlang/ipa-whisper-small"
@@ -35,11 +29,38 @@ ALLOWED_MIME_TYPES = [
     "audio/aiff",
 ]
 
+TARGET_SR = 16000
+# Prepend silence so Whisper doesn't drop the beginning of the speech (known issue)
+PREPEND_SILENCE_SEC = 1.5
+
+app = FastAPI()
+
+processor = None
+model = None
+_load_lock = asyncio.Lock()
+
+@app.middleware("http")
+async def validate_upload_size(request: Request, call_next):
+    if request.url.path == "/api/transcriptions/" and request.method == "POST":
+        content_length = request.headers.get("content-length")
+        if not content_length:
+            raise HTTPException(status_code=411, detail="Content-Length header required.")
+        file_size = int(content_length)
+        if file_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Limit is {MAX_FILE_SIZE / 1024 / 1024} MB.",
+            )
+    response = await call_next(request)
+    return response
+
 
 def _load_model():
     global processor, model
     processor = WhisperProcessor.from_pretrained(MODEL_ID, cache_dir=CACHE_DIR, local_files_only=True)
-    model = WhisperForConditionalGeneration.from_pretrained(MODEL_ID, cache_dir=CACHE_DIR, local_files_only=True)
+    model = WhisperForConditionalGeneration.from_pretrained(
+        MODEL_ID, cache_dir=CACHE_DIR, torch_dtype=torch.float16, local_files_only=True
+    )
 
 
 async def _get_model():
@@ -48,9 +69,6 @@ async def _get_model():
         if model is None:
             await asyncio.to_thread(_load_model)
     return processor, model
-
-
-TARGET_SR = 16000
 
 
 def _load_audio_16k(path: str) -> tuple[np.ndarray, int]:
@@ -77,30 +95,30 @@ def _transcribe(path: str) -> str:
         raise ValueError(
             f"Audio too long: {duration_sec:.2f}s. Maximum is {MAX_AUDIO_LENGTH}s."
         )
+    # Prepend silence so model doesn't miss the first ~0.5s (Whisper quirk)
+    prepend_samples = int(PREPEND_SILENCE_SEC * sampling_rate)
+    audio_array = np.concatenate([np.zeros(prepend_samples, dtype=audio_array.dtype), audio_array])
     processed = processor(
         audio_array,
         sampling_rate=sampling_rate,
         return_attention_mask=True,
         return_tensors="pt",
     )
+    # Match model dtype (float16)
+    input_features = processed.input_features.to(dtype=model.dtype, device=model.device)
+    attention_mask = processed.attention_mask.to(device=model.device)
     predicted_ids = model.generate(
-        processed.input_features,
-        attention_mask=processed.attention_mask,
+        input_features,
+        attention_mask=attention_mask,
     )
     transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
     return f"/{''.join(transcription)}/"
 
 
 @app.post("/api/transcriptions/")
-async def transcribe_recording(request: Request, file: UploadFile):
+async def transcribe_recording(file: UploadFile):
     if file.content_type not in ALLOWED_MIME_TYPES:
         raise HTTPException(status_code=415, detail="Unsupported file type.")
-    content_length = request.headers.get("content-length")
-    if not content_length:
-        raise HTTPException(status_code=411, detail="Content-Length header required.")
-    file_size = int(content_length)
-    if file_size > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"File too large. Limit is {MAX_FILE_SIZE / 1024 / 1024} MB.")
 
     suffix = os.path.splitext(file.filename or "")[1] or ".wav"
     fd, path = tempfile.mkstemp(suffix=suffix)

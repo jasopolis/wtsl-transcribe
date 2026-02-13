@@ -14,6 +14,12 @@ dependencies = [
     "transformers>=5.1.0",
 ]
 
+[tool.uv]
+# Reduce memory during uv sync / install (torch, transformers, scipy, etc.)
+concurrent-builds = 1
+concurrent-downloads = 4
+concurrent-installs = 2
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
