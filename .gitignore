@@ -8,6 +8,7 @@ whisper.cpp/build/
 
 # Whisper ggml models: tracked with Git LFS (see .gitattributes)
 # Do not ignore models/*.bin so LFS can track them.
+# Prebuilt whisper-server: bin/whisper-server tracked with Git LFS; do not ignore.
 
 # FastAPI specific
 app.log

@@ -35,7 +35,7 @@ export WHISPER_CPP_BUILD="$(pwd)/whisper.cpp/build"
 ./scripts/run-convert-ipa-to-ggml.sh --quantize   # → models/ggml-ipa-whisper-small-q5_0.bin (~182 MB)
 ```
 
-Repo uses **Git LFS** for `models/*.bin`. One-time: `git lfs install`. Then `git add models/ggml-ipa-whisper-small-q5_0.bin` and commit.
+Repo uses **Git LFS** for `models/*.bin` and `bin/whisper-server`. One-time: `git lfs install`. Then `git add models/ggml-ipa-whisper-small-q5_0.bin` and commit.
 
 ### 2. Build and run server
 
@@ -51,7 +51,17 @@ Server: **http://0.0.0.0:8080**. Install **ffmpeg** for non-WAV uploads (optiona
 
 ## Deploy (Vercel)
 
-- **Model**: Tracked with Git LFS; Vercel build runs `git lfs pull`. Enable **Include Git submodules** (or init submodule before deploy) for Linux fallback build.
+Vercel’s builder has no cmake, so the **whisper-server binary is prebuilt and committed via Git LFS** (same approach as the model).
+
+- **Prebuild binary (one-time or when updating whisper.cpp):**  
+  From repo root, run `./scripts/build-server-linux.sh` (requires Docker). That produces a Linux x64 binary in `bin/whisper-server`. Then:
+  ```bash
+  git lfs install   # if not already
+  git add bin/whisper-server
+  git commit -m "Update prebuilt whisper-server (Linux)"
+  git push
+  ```
+- **Model**: Tracked with Git LFS; Vercel runs `git lfs pull` in the install step.
+- **Build**: `npm run build` uses the prebuilt `bin/whisper-server` from the repo (no cmake on Vercel). `api/inference.ts` proxies to it. Send WAV (16 kHz mono); no ffmpeg in bundle.
 - **Deploy**: `npm i -g vercel` then `vercel`. Env: `MODEL_PATH`, `BIN_DIR` (optional).
-- **Build**: `npm run build` fetches CPU-only prebuilt into `bin/whisper-server` (or builds from submodule). `api/inference.ts` proxies to it. Send WAV (16 kHz mono); no ffmpeg in bundle.
 - **Limits**: 250MB bundle, 1GB memory (in `vercel.json`). Use smaller model if needed.

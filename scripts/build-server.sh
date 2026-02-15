@@ -3,7 +3,8 @@
 # Requires: cmake, C++17 toolchain. Run from repo root.
 #
 # Usage: ./scripts/build-server.sh [--for-deploy]
-#   --for-deploy  Init submodule, build, copy binary to bin/whisper-server, then remove source.
+#   --for-deploy  Use prebuilt bin/whisper-server if present (e.g. from Git LFS);
+#                 otherwise init submodule, build, copy to bin/, then remove source.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,6 +12,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WHISPER_CPP="${WHISPER_CPP:-$REPO_ROOT/whisper.cpp}"
 FOR_DEPLOY=false
 [[ "${1:-}" == "--for-deploy" ]] && FOR_DEPLOY=true
+
+# Deploy (e.g. Vercel): use prebuilt binary from Git LFS only; no cmake on deploy.
+if $FOR_DEPLOY; then
+  BIN_DIR="$REPO_ROOT/bin"
+  PREBUILT="$BIN_DIR/whisper-server"
+  if [[ -x "$PREBUILT" ]]; then
+    echo "Using prebuilt bin/whisper-server (from Git LFS or previous build)."
+    exit 0
+  fi
+  echo "error: bin/whisper-server not found. Deploy requires a prebuilt binary in Git LFS."
+  echo "  Local: run ./scripts/build-server-linux.sh then git add bin/whisper-server && git commit && git push"
+  exit 1
+fi
 
 if [[ ! -d "$WHISPER_CPP" ]]; then
   if $FOR_DEPLOY; then
