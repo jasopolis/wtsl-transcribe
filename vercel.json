@@ -1,7 +1,6 @@
 {
   "functions": {
     "api/inference.ts": {
-      "memory": 1024,
       "maxDuration": 60
     }
   },
