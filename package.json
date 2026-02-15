@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "bash scripts/download-whisper-bin.sh",
+    "build": "bash scripts/build-server.sh --for-deploy",
     "vercel-build": "npm run build"
   },
   "engines": {
