@@ -1,0 +1,13 @@
+# Keep deployment under 250MB: exclude source and build artifacts
+whisper.cpp/
+scripts/run-convert-ipa-to-ggml.sh
+scripts/run-server.sh
+scripts/build-server.sh
+scripts/README.md
+*.md
+!README.md
+.env
+.env.*
+*.wav
+*.ogg
+*.mp3

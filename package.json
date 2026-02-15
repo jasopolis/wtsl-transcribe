@@ -1,0 +1,12 @@
+{
+  "name": "wtsl-transcribe",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "bash scripts/download-whisper-bin.sh",
+    "vercel-build": "npm run build"
+  },
+  "engines": {
+    "node": "^24.13.1"
+  }
+}

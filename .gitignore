@@ -1,5 +1,13 @@
 # App
 cache/
+.convert-workdir/
+node_modules/
+
+# whisper.cpp build (submodule)
+whisper.cpp/build/
+
+# Whisper ggml models: tracked with Git LFS (see .gitattributes)
+# Do not ignore models/*.bin so LFS can track them.
 
 # FastAPI specific
 app.log
@@ -68,3 +76,4 @@ Thumbs.db
 app.log
 uvicorn.log
 debug.log
+.vercel

@@ -1,0 +1,2 @@
+# Converted/quantized Whisper ggml models (Git LFS)
+models/*.bin filter=lfs diff=lfs merge=lfs -text
