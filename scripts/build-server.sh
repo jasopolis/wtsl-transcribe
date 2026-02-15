@@ -19,11 +19,15 @@ if $FOR_DEPLOY; then
   PREBUILT="$BIN_DIR/whisper-server"
   if [[ -x "$PREBUILT" ]]; then
     echo "Using prebuilt bin/whisper-server (from Git LFS or previous build)."
-    exit 0
+  else
+    echo "error: bin/whisper-server not found. Deploy requires a prebuilt binary in Git LFS."
+    echo "  Local: run ./scripts/build-server-linux.sh then git add bin/whisper-server && git commit && git push"
+    exit 1
   fi
-  echo "error: bin/whisper-server not found. Deploy requires a prebuilt binary in Git LFS."
-  echo "  Local: run ./scripts/build-server-linux.sh then git add bin/whisper-server && git commit && git push"
-  exit 1
+  # Vercel expects an output directory (default "public"); create it so the build succeeds.
+  mkdir -p "$REPO_ROOT/public"
+  echo "Created public/ for Vercel output directory."
+  exit 0
 fi
 
 if [[ ! -d "$WHISPER_CPP" ]]; then
