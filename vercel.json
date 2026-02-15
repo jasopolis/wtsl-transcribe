@@ -5,6 +5,6 @@
       "maxDuration": 60
     }
   },
-  "installCommand": "git lfs install && git lfs pull && npm install",
+  "installCommand": "git lfs install && git lfs pull && git submodule update --init --recursive && npm install",
   "buildCommand": "npm run build"
 }
