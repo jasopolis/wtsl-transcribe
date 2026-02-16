@@ -53,7 +53,8 @@ function startServer(): Promise<number> {
     }
     const bin = getBinPath();
     const model = ensureModel();
-    const tmpDir = join(process.cwd(), "tmp");
+    // Vercel: filesystem is read-only except /tmp (see vercel.com/docs/functions/runtimes#file-system-support)
+    const tmpDir = "/tmp/whisper-inference";
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
 
     getFreePort()
