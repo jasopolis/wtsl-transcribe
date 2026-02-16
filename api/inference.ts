@@ -82,29 +82,46 @@ function startServer(): Promise<number> {
         serverPort = port;
 
         let stderr = "";
+        let settled = false;
+        const doReject = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          reject(err);
+        };
+        const doResolve = (p: number) => {
+          if (settled) return;
+          settled = true;
+          resolve(p);
+        };
         proc.stderr?.on("data", (c) => (stderr += c.toString()));
-        proc.on("error", (err) => reject(err));
+        proc.on("error", (err) => doReject(err));
         proc.on("exit", (code) => {
           serverProcess = null;
           serverPort = null;
           if (code !== 0 && code !== null) {
             console.error("whisper-server stderr:", stderr);
+            const hint = stderr.includes("cannot execute binary file")
+              ? " Binary must be Linux x86_64 for Vercel. Build with: ./scripts/build-server-linux.sh"
+              : "";
+            doReject(new Error(`whisper-server exited ${code}: ${stderr.trim()}${hint}`));
           }
         });
 
         // Wait for server to accept TCP connections
         const deadline = Date.now() + 60000;
         const tryConnect = () => {
+          if (settled) return;
           const sock = createConnection(
             { host: "127.0.0.1", port },
             () => {
               sock.destroy();
-              resolve(port);
+              doResolve(port);
             }
           );
           sock.on("error", () => {
+            if (settled) return;
             if (Date.now() < deadline) setTimeout(tryConnect, 200);
-            else reject(new Error("whisper-server failed to start"));
+            else doReject(new Error("whisper-server failed to start"));
           });
         };
         setTimeout(tryConnect, 500);

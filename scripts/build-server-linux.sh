@@ -23,8 +23,8 @@ fi
 BIN_DIR="$REPO_ROOT/bin"
 mkdir -p "$BIN_DIR"
 
-echo "Building Linux x64 whisper-server in Docker..."
-docker run --rm \
+echo "Building Linux x64 whisper-server in Docker (linux/amd64 for Vercel)..."
+docker run --rm --platform linux/amd64 \
   -v "$REPO_ROOT:/repo:rw" \
   -w /repo/whisper.cpp \
   ubuntu:22.04 \
