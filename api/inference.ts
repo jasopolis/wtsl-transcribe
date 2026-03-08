@@ -3,9 +3,7 @@
  *
  * Loads the native addon (bin/whisper-addon.node) and runs inference in-process
  * — no child-process server, no TCP proxy.  The GGML model is loaded once per
- * cold-start and reused across warm invocations (whisper.cpp caches internally
- * within the addon's whisper_init_from_file_with_params call per invocation,
- * but the .node shared object stays loaded in the V8 process).
+ * cold-start and reused across warm invocations.
  *
  * Bundle budget:  addon (~800 KB) + libs (~2.6 MB) + model (~168 MB) ≈ 172 MB
  * well within Vercel's 250 MB compressed limit.
@@ -13,13 +11,14 @@
 
 import {
   existsSync, writeFileSync, unlinkSync, mkdirSync,
-  statSync, readdirSync, readFileSync, symlinkSync, lstatSync, copyFileSync
+  statSync, readdirSync, lstatSync, symlinkSync
 } from "fs";
 import { join } from "path";
 import { promisify } from "util";
 import { createRequire } from "module";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { IncomingForm, type File as FormidableFile } from "formidable";
+import { Readable } from "stream";
+import Busboy from "busboy";
 
 const BIN_DIR = process.env.BIN_DIR || join(process.cwd(), "bin");
 const LIB_DIR = process.env.LIB_DIR || join(BIN_DIR, "lib");
@@ -40,11 +39,6 @@ const SONAME_MAP: Record<string, string> = {
   "libggml-cpu.so":    "libggml-cpu.so.0.9.6",
 };
 
-/**
- * Vercel deployments don't preserve symlinks. The linker expects soname
- * aliases (e.g. libwhisper.so.1). We copy the real versioned .so into
- * a writable /tmp dir under every expected alias.
- */
 function ensureLibDir(): string {
   if (existsSync(TMP_LIB_DIR) && readdirSync(TMP_LIB_DIR).length > 0) {
     return TMP_LIB_DIR;
@@ -52,13 +46,9 @@ function ensureLibDir(): string {
   mkdirSync(TMP_LIB_DIR, { recursive: true });
 
   const entries = readdirSync(LIB_DIR);
-  const diag: string[] = [];
-
   for (const entry of entries) {
     const fullPath = join(LIB_DIR, entry);
     const stat = lstatSync(fullPath);
-    diag.push(`${entry}:${stat.size}:${stat.isSymbolicLink() ? "sym" : "file"}`);
-
     if (stat.isFile() && stat.size > 1000) {
       const dest = join(TMP_LIB_DIR, entry);
       if (!existsSync(dest)) symlinkSync(fullPath, dest);
@@ -73,8 +63,6 @@ function ensureLibDir(): string {
     }
   }
 
-  console.log(`[inference] lib diag: ${diag.join(", ")}`);
-  console.log(`[inference] tmp lib: ${JSON.stringify(readdirSync(TMP_LIB_DIR))}`);
   return TMP_LIB_DIR;
 }
 
@@ -85,10 +73,6 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
   }
 
   const libDir = ensureLibDir();
-
-  // Ensure LD_LIBRARY_PATH includes both the tmp dir (with soname aliases)
-  // and the original lib dir. The env var may already be set by Vercel project
-  // settings, but we prepend the tmp dir to pick up recreated aliases.
   const sep = ":";
   const current = process.env.LD_LIBRARY_PATH || "";
   const dirs = current ? current.split(sep) : [];
@@ -99,14 +83,10 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
 
   const addonPath = join(BIN_DIR, "whisper-addon.node");
   if (!existsSync(addonPath)) {
-    throw new Error(
-      `whisper-addon.node not found at ${addonPath}. Run: npm run build`
-    );
+    throw new Error(`whisper-addon.node not found at ${addonPath}. Run: npm run build`);
   }
 
-  const addonSize = statSync(addonPath).size;
-  console.log(`[inference] addon file size: ${addonSize} bytes`);
-
+  console.log(`[inference] addon file size: ${statSync(addonPath).size} bytes`);
   console.log(`[inference] loading addon via require()...`);
   const require_ = createRequire(__filename);
   const { whisper } = require_(addonPath);
@@ -123,17 +103,9 @@ function getWhisper() {
 
 function ensureModel(): string {
   if (!existsSync(MODEL_PATH)) {
-    throw new Error(
-      `Model not found at ${MODEL_PATH}. Add it to models/ or set MODEL_PATH.`
-    );
+    throw new Error(`Model not found at ${MODEL_PATH}. Add it to models/ or set MODEL_PATH.`);
   }
   return MODEL_PATH;
-}
-
-interface WhisperSegment {
-  start: string;
-  end: string;
-  text: string;
 }
 
 interface WhisperResult {
@@ -143,12 +115,8 @@ interface WhisperResult {
 
 async function transcribe(
   audioPath: string,
-  opts: {
-    temperature?: number;
-    language?: string;
-    response_format?: string;
-  } = {}
-): Promise<{ segments: WhisperSegment[]; text: string; language?: string }> {
+  opts: { temperature?: number; language?: string; response_format?: string } = {}
+) {
   const whisper = getWhisper();
   const whisperAsync = promisify(whisper);
   const model = ensureModel();
@@ -166,46 +134,61 @@ async function transcribe(
   })) as WhisperResult;
   console.log(`[inference] transcription completed in ${Date.now() - t0}ms`);
 
-  const segments: WhisperSegment[] = (result.transcription || []).map(
-    ([start, end, text]) => ({ start, end, text: text.trim() })
+  const segments = (result.transcription || []).map(
+    ([start, end, text]: [string, string, string]) => ({ start, end, text: text.trim() })
   );
 
   return {
     segments,
-    text: segments.map((s) => s.text).join(" "),
+    text: segments.map((s: { text: string }) => s.text).join(" "),
     ...(result.language ? { language: result.language } : {}),
   };
 }
 
-function parseForm(req: VercelRequest): Promise<{ fields: Record<string, string>; filePath: string }> {
+interface ParsedForm {
+  fields: Record<string, string>;
+  filePath: string;
+}
+
+function parseMultipart(req: VercelRequest): Promise<ParsedForm> {
   return new Promise((resolve, reject) => {
     if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
-    const form = new IncomingForm({
-      uploadDir: TMP_DIR,
-      keepExtensions: true,
-      maxFileSize: 50 * 1024 * 1024,
+    const tmpPath = join(TMP_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+    const fields: Record<string, string> = {};
+    let fileFound = false;
+    let fileStream: import("stream").Writable | null = null;
+
+    const bb = Busboy({ headers: req.headers as Record<string, string> });
+
+    bb.on("file", (_name: string, stream: Readable, _info: { filename: string }) => {
+      fileFound = true;
+      const { createWriteStream } = require("fs") as typeof import("fs");
+      fileStream = createWriteStream(tmpPath);
+      stream.pipe(fileStream);
     });
-    form.parse(req, (err, fields, files) => {
-      if (err) return reject(err);
-      const fileField = files.file;
-      if (!fileField) return reject(new Error('Missing "file" field. Send audio as multipart form: -F "file=@audio.wav"'));
-      const file: FormidableFile = Array.isArray(fileField) ? fileField[0] : fileField;
-      const flatFields: Record<string, string> = {};
-      for (const [k, v] of Object.entries(fields)) {
-        flatFields[k] = Array.isArray(v) ? v[0] : (v ?? "");
+
+    bb.on("field", (name: string, val: string) => {
+      fields[name] = val;
+    });
+
+    bb.on("close", () => {
+      if (!fileFound) {
+        return reject(new Error('Missing "file" field. Send audio as multipart form: -F "file=@audio.wav"'));
       }
-      resolve({ fields: flatFields, filePath: file.filepath });
+      if (fileStream) {
+        fileStream.on("finish", () => resolve({ fields, filePath: tmpPath }));
+      } else {
+        resolve({ fields, filePath: tmpPath });
+      }
     });
+
+    bb.on("error", (err: Error) => reject(err));
+
+    req.pipe(bb);
   });
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
-  process.on("uncaughtException", (err) => {
-    console.error("[inference] UNCAUGHT:", err.message, err.stack);
-  });
-  process.on("unhandledRejection", (reason) => {
-    console.error("[inference] UNHANDLED REJECTION:", reason);
-  });
   console.log(`[inference] handler invoked: ${req.method} ${req.url}`);
 
   if (req.method !== "POST") {
@@ -215,16 +198,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // Debug: test minimal response for POST
-  const contentType = req.headers["content-type"] || "";
-  console.log(`[inference] content-type: ${contentType}`);
-  console.log(`[inference] content-length: ${req.headers["content-length"]}`);
-
   let filePath: string | undefined;
 
   try {
-    console.log("[inference] parsing form data...");
-    const { fields, filePath: fp } = await parseForm(req);
+    console.log("[inference] parsing multipart form data...");
+    const { fields, filePath: fp } = await parseMultipart(req);
     filePath = fp;
     console.log(`[inference] form parsed: file=${fp}, fields=${JSON.stringify(fields)}`);
 
@@ -232,13 +210,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const responseFormat = fields.response_format || "json";
     const language = fields.language || "en";
 
-    console.log("[inference] loading addon...");
     const result = await transcribe(filePath, {
       temperature,
       language,
       response_format: responseFormat,
     });
-    console.log("[inference] inference complete");
 
     if (responseFormat === "text") {
       res.setHeader("Content-Type", "text/plain");
@@ -249,12 +225,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     res.status(200).json(result);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    const stack = err instanceof Error ? err.stack : undefined;
-    console.error("Inference error:", message, stack);
-    res.status(500).json({ error: message, stack, cwd: process.cwd() });
+    console.error("Inference error:", message);
+    res.status(500).json({ error: message, cwd: process.cwd() });
   } finally {
     if (filePath) {
-      try { unlinkSync(filePath); } catch { /* best-effort cleanup */ }
+      try { unlinkSync(filePath); } catch { /* best-effort */ }
     }
   }
 }
