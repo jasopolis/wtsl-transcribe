@@ -178,9 +178,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
     }
     console.log(`[inference] body: ${rawBody.length} bytes`);
-    // TEMP DEBUG: return immediately after body read
-    res.status(200).json({ bodyLen: rawBody.length, ct: req.headers["content-type"] });
-    return;
+    const contentType = req.headers["content-type"] || "";
+    const boundaryMatch = contentType.match(/boundary=(.+)/);
+    if (!boundaryMatch) {
+      res.status(400).json({ error: "Missing multipart boundary in Content-Type" });
+      return;
+    }
+    const { file, fields } = parseMultipartBuffer(rawBody, boundaryMatch[1]);
+    if (!file || file.length === 0) {
+      res.status(400).json({ error: 'Missing "file" field. Send audio as: -F "file=@audio.wav"' });
+      return;
+    }
+
+    if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
+    tmpPath = join(TMP_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+    writeFileSync(tmpPath, file);
+
+    const language = fields.language || "en";
+    const responseFormat = fields.response_format || "json";
+
+    const result = await transcribe(tmpPath, { language });
+
+    if (responseFormat === "text") {
+      res.setHeader("Content-Type", "text/plain");
+      res.status(200).send(result.text);
+      return;
+    }
+    res.status(200).json(result);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("Inference error:", message);
