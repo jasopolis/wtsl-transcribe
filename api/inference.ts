@@ -197,10 +197,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const language = fields.language || "en";
     const responseFormat = fields.response_format || "json";
 
-    // TEMP: return parsed data without transcription
-    res.status(200).json({ fileSize: file.length, tmpPath, fields });
-    return;
-
     const result = await transcribe(tmpPath, { language });
 
     if (responseFormat === "text") {
