@@ -38,6 +38,8 @@ const SONAME_MAP: Record<string, string> = {
   "libggml-base.so":   "libggml-base.so.0.9.6",
   "libggml-cpu.so.0":  "libggml-cpu.so.0.9.6",
   "libggml-cpu.so":    "libggml-cpu.so.0.9.6",
+  "libgomp.so.1":      "libgomp.so.1.0.0",
+  "libgomp.so":        "libgomp.so.1.0.0",
 };
 
 /**
