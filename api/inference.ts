@@ -24,15 +24,16 @@ const MODEL_PATH =
 const TMP_DIR = "/tmp/whisper-inference";
 
 function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, result?: unknown) => void) => void {
+  console.log(`[inference] loadAddon: BIN_DIR=${BIN_DIR}, LIB_DIR=${LIB_DIR}`);
   if (!existsSync(LIB_DIR)) {
     throw new Error(`Shared libraries not found at ${LIB_DIR}. Run: npm run build`);
   }
-  // Prepend LIB_DIR so the dynamic linker finds libwhisper / libggml at dlopen time
   const sep = ":";
   const current = process.env.LD_LIBRARY_PATH || "";
   if (!current.split(sep).includes(LIB_DIR)) {
     process.env.LD_LIBRARY_PATH = LIB_DIR + (current ? sep + current : "");
   }
+  console.log(`[inference] LD_LIBRARY_PATH=${process.env.LD_LIBRARY_PATH}`);
 
   const addonPath = join(BIN_DIR, "whisper-addon.node");
   if (!existsSync(addonPath)) {
@@ -41,8 +42,16 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
     );
   }
 
+  const { statSync, readdirSync } = require("fs") as typeof import("fs");
+  const addonSize = statSync(addonPath).size;
+  console.log(`[inference] addon file size: ${addonSize} bytes`);
+  const libFiles = readdirSync(LIB_DIR);
+  console.log(`[inference] lib dir contents: ${JSON.stringify(libFiles)}`);
+
+  console.log(`[inference] loading addon via require()...`);
   const require_ = createRequire(__filename);
   const { whisper } = require_(addonPath);
+  console.log(`[inference] addon loaded successfully`);
   return whisper;
 }
 
@@ -85,6 +94,8 @@ async function transcribe(
   const whisperAsync = promisify(whisper);
   const model = ensureModel();
 
+  console.log(`[inference] starting whisper transcription: model=${model}, audio=${audioPath}`);
+  const t0 = Date.now();
   const result = (await whisperAsync({
     model,
     fname_inp: audioPath,
@@ -94,6 +105,7 @@ async function transcribe(
     no_timestamps: false,
     comma_in_time: false,
   })) as WhisperResult;
+  console.log(`[inference] transcription completed in ${Date.now() - t0}ms`);
 
   const segments: WhisperSegment[] = (result.transcription || []).map(
     ([start, end, text]) => ({ start, end, text: text.trim() })
@@ -107,6 +119,8 @@ async function transcribe(
 }
 
 export default async function handler(req: Request): Promise<Response> {
+  console.log(`[inference] handler invoked: ${req.method} ${new URL(req.url).pathname}`);
+
   if (req.method !== "POST") {
     return new Response(
       JSON.stringify({
