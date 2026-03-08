@@ -184,7 +184,17 @@ function parseMultipart(req: VercelRequest): Promise<ParsedForm> {
 
     bb.on("error", (err: Error) => reject(err));
 
-    req.pipe(bb);
+    // When bodyParser is enabled, req.body is a Buffer.
+    // Create a Readable from it and pipe to busboy.
+    if (Buffer.isBuffer(req.body)) {
+      const bodyStream = Readable.from(req.body);
+      bodyStream.pipe(bb);
+    } else if (typeof req.body === "string") {
+      const bodyStream = Readable.from(Buffer.from(req.body));
+      bodyStream.pipe(bb);
+    } else {
+      req.pipe(bb);
+    }
   });
 }
 
@@ -236,6 +246,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
 export const config = {
   api: {
-    bodyParser: false,
+    bodyParser: {
+      sizeLimit: "50mb",
+    },
   },
 };
