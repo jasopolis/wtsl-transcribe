@@ -208,20 +208,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // Debug: just report what we received
-  const bodyType = typeof req.body;
-  const bodyLen = Buffer.isBuffer(req.body) ? req.body.length : (typeof req.body === "string" ? req.body.length : JSON.stringify(req.body || "").length);
-  console.log(`[inference] body type=${bodyType}, len=${bodyLen}`);
+  let filePath: string | undefined;
 
-  res.status(200).json({
-    debug: true,
-    bodyType,
-    bodyLen,
-    headers: {
-      "content-type": req.headers["content-type"],
-      "content-length": req.headers["content-length"],
-    },
-  });
+  try {
+    console.log("[inference] parsing multipart form data...");
+    const { fields, filePath: fp } = await parseMultipart(req);
+    filePath = fp;
+    console.log(`[inference] form parsed: file=${fp}, fields=${JSON.stringify(fields)}`);
+
+    const temperature = parseFloat(fields.temperature || "0.0");
+    const responseFormat = fields.response_format || "json";
+    const language = fields.language || "en";
+
+    const result = await transcribe(filePath, {
+      temperature,
+      language,
+      response_format: responseFormat,
+    });
+
+    if (responseFormat === "text") {
+      res.setHeader("Content-Type", "text/plain");
+      res.status(200).send(result.text);
+      return;
+    }
+
+    res.status(200).json(result);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Inference error:", message);
+    res.status(500).json({ error: message, cwd: process.cwd() });
+  } finally {
+    if (filePath) {
+      try { unlinkSync(filePath); } catch { /* best-effort */ }
+    }
+  }
 }
 
 export const config = {
