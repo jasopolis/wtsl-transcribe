@@ -55,6 +55,7 @@ function ensureLibDir(): string {
 }
 
 function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, result?: unknown) => void) => void {
+  console.log("[inference] loadAddon called");
   if (!existsSync(LIB_DIR)) {
     throw new Error(`Shared libraries not found at ${LIB_DIR}. Run: npm run build`);
   }
@@ -94,7 +95,9 @@ interface WhisperResult {
 }
 
 async function transcribe(audioPath: string, opts: { language?: string } = {}) {
+  console.log("[inference] transcribe() starting");
   const whisper = getWhisper();
+  console.log("[inference] whisper function obtained");
   const whisperAsync = promisify(whisper);
   if (!existsSync(MODEL_PATH)) throw new Error(`Model not found at ${MODEL_PATH}`);
 
