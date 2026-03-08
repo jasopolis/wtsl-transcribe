@@ -159,9 +159,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
+  // Debug: test if collectBody itself causes the crash
+  console.log(`[inference] about to collect body, readable=${req.readable}, bodyType=${typeof req.body}`);
   let tmpPath: string | undefined;
   try {
     const rawBody = await collectBody(req);
+    console.log(`[inference] body collected: ${rawBody.length} bytes`);
     const contentType = req.headers["content-type"] || "";
     const boundaryMatch = contentType.match(/boundary=(.+)/);
     if (!boundaryMatch) {
