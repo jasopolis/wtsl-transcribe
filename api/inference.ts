@@ -212,18 +212,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   let filePath: string | undefined;
 
   try {
+    console.log("[inference] parsing form data...");
     const { fields, filePath: fp } = await parseForm(req);
     filePath = fp;
+    console.log(`[inference] form parsed: file=${fp}, fields=${JSON.stringify(fields)}`);
 
     const temperature = parseFloat(fields.temperature || "0.0");
     const responseFormat = fields.response_format || "json";
     const language = fields.language || "en";
 
+    console.log("[inference] loading addon...");
     const result = await transcribe(filePath, {
       temperature,
       language,
       response_format: responseFormat,
     });
+    console.log("[inference] inference complete");
 
     if (responseFormat === "text") {
       res.setHeader("Content-Type", "text/plain");
@@ -235,7 +239,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     const stack = err instanceof Error ? err.stack : undefined;
-    console.error("Inference error:", message);
+    console.error("Inference error:", message, stack);
     res.status(500).json({ error: message, stack, cwd: process.cwd() });
   } finally {
     if (filePath) {
