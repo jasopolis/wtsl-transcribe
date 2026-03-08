@@ -184,7 +184,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       res.status(400).json({ error: "Missing multipart boundary in Content-Type" });
       return;
     }
+    console.log("[inference] parsing multipart...");
     const { file, fields } = parseMultipartBuffer(rawBody, boundaryMatch[1]);
+    console.log(`[inference] parsed: file=${file?.length || 0} bytes, fields=${JSON.stringify(fields)}`);
     if (!file || file.length === 0) {
       res.status(400).json({ error: 'Missing "file" field. Send audio as: -F "file=@audio.wav"' });
       return;
@@ -193,11 +195,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
     tmpPath = join(TMP_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
     writeFileSync(tmpPath, file);
+    console.log(`[inference] wrote ${file.length} bytes to ${tmpPath}`);
 
     const language = fields.language || "en";
     const responseFormat = fields.response_format || "json";
 
+    console.log("[inference] starting transcription...");
     const result = await transcribe(tmpPath, { language });
+    console.log("[inference] transcription done");
 
     if (responseFormat === "text") {
       res.setHeader("Content-Type", "text/plain");
