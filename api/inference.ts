@@ -159,12 +159,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // Debug: test if collectBody itself causes the crash
-  console.log(`[inference] about to collect body, readable=${req.readable}, bodyType=${typeof req.body}`);
   let tmpPath: string | undefined;
   try {
-    const rawBody = await collectBody(req);
-    console.log(`[inference] body collected: ${rawBody.length} bytes`);
+    // Try reading from the raw body that Vercel's body parser may have stored
+    let rawBody: Buffer;
+    if (Buffer.isBuffer(req.body)) {
+      rawBody = req.body;
+    } else if (typeof req.body === "string") {
+      rawBody = Buffer.from(req.body, "binary");
+    } else {
+      // Body parser couldn't parse multipart; body is undefined but
+      // the raw bytes may still be available via (req as any).rawBody
+      const raw = (req as unknown as { rawBody?: Buffer }).rawBody;
+      if (Buffer.isBuffer(raw)) {
+        rawBody = raw;
+      } else {
+        rawBody = await collectBody(req);
+      }
+    }
+    console.log(`[inference] body: ${rawBody.length} bytes`);
     const contentType = req.headers["content-type"] || "";
     const boundaryMatch = contentType.match(/boundary=(.+)/);
     if (!boundaryMatch) {
