@@ -1,4 +1,5 @@
 {
+  "fluid": true,
   "functions": {
     "api/inference.ts": {
       "maxDuration": 300,
