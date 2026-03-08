@@ -215,6 +215,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
+  // Debug: test minimal response for POST
+  const contentType = req.headers["content-type"] || "";
+  console.log(`[inference] content-type: ${contentType}`);
+  console.log(`[inference] content-length: ${req.headers["content-length"]}`);
+
   let filePath: string | undefined;
 
   try {
