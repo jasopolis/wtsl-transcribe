@@ -184,16 +184,22 @@ function parseMultipart(req: VercelRequest): Promise<ParsedForm> {
 
     bb.on("error", (err: Error) => reject(err));
 
-    // When bodyParser is enabled, req.body is a Buffer.
-    // Create a Readable from it and pipe to busboy.
+    // Read the raw request body. With bodyParser enabled, Vercel may have already
+    // consumed the stream. Read from req.body if available, otherwise collect from stream.
     if (Buffer.isBuffer(req.body)) {
-      const bodyStream = Readable.from(req.body);
-      bodyStream.pipe(bb);
+      Readable.from(req.body).pipe(bb);
     } else if (typeof req.body === "string") {
-      const bodyStream = Readable.from(Buffer.from(req.body));
-      bodyStream.pipe(bb);
+      Readable.from(Buffer.from(req.body)).pipe(bb);
     } else {
-      req.pipe(bb);
+      // Body not parsed; collect raw chunks from the request stream
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks);
+        console.log(`[inference] raw body collected: ${body.length} bytes`);
+        Readable.from(body).pipe(bb);
+      });
+      req.on("error", (err: Error) => reject(err));
     }
   });
 }
@@ -212,6 +218,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   try {
     console.log("[inference] parsing multipart form data...");
+    console.log(`[inference] body type=${typeof req.body}, readable=${req.readable}`);
     const { fields, filePath: fp } = await parseMultipart(req);
     filePath = fp;
     console.log(`[inference] form parsed: file=${fp}, fields=${JSON.stringify(fields)}`);
