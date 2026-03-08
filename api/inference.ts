@@ -70,9 +70,16 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
   if (!existsSync(addonPath)) {
     throw new Error(`whisper-addon.node not found at ${addonPath}. Run: npm run build`);
   }
+  console.log(`[inference] addon size: ${statSync(addonPath).size}, loading...`);
   const require_ = createRequire(__filename);
-  const { whisper } = require_(addonPath);
-  return whisper;
+  try {
+    const { whisper } = require_(addonPath);
+    console.log("[inference] addon loaded OK");
+    return whisper;
+  } catch (err) {
+    console.error("[inference] addon load FAILED:", err);
+    throw err;
+  }
 }
 
 let whisperFn: ReturnType<typeof loadAddon> | null = null;
