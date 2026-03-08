@@ -8,7 +8,7 @@ whisper.cpp/build/
 
 # Whisper ggml models: tracked with Git LFS (see .gitattributes)
 # Do not ignore models/*.bin so LFS can track them.
-# Prebuilt whisper-server: bin/whisper-server tracked with Git LFS; do not ignore.
+# Prebuilt addon + shared libs: bin/ tracked with Git LFS; do not ignore.
 
 # FastAPI specific
 app.log
@@ -37,6 +37,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+!bin/lib/*.so
+!bin/lib/*.so.*
 build/
 dist/
 *.egg-info/
@@ -78,3 +80,4 @@ app.log
 uvicorn.log
 debug.log
 .vercel
+test_input.wav
