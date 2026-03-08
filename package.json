@@ -11,6 +11,11 @@
     "node": ">=20.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@types/formidable": "^3.5.0",
+    "@types/node": "^22.0.0",
+    "@vercel/node": "^5.6.11"
+  },
+  "dependencies": {
+    "formidable": "^3.5.4"
   }
 }

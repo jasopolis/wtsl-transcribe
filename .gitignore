@@ -80,3 +80,4 @@ app.log
 uvicorn.log
 debug.log
 .vercel
+test_input.wav

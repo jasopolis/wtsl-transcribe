@@ -11,10 +11,12 @@
  * well within Vercel's 250 MB compressed limit.
  */
 
-import { existsSync, writeFileSync, unlinkSync, mkdirSync } from "fs";
+import { existsSync, writeFileSync, unlinkSync, mkdirSync, statSync, readdirSync } from "fs";
 import { join } from "path";
 import { promisify } from "util";
 import { createRequire } from "module";
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { IncomingForm, type File as FormidableFile } from "formidable";
 
 const BIN_DIR = process.env.BIN_DIR || join(process.cwd(), "bin");
 const LIB_DIR = process.env.LIB_DIR || join(BIN_DIR, "lib");
@@ -42,7 +44,6 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
     );
   }
 
-  const { statSync, readdirSync } = require("fs") as typeof import("fs");
   const addonSize = statSync(addonPath).size;
   console.log(`[inference] addon file size: ${addonSize} bytes`);
   const libFiles = readdirSync(LIB_DIR);
@@ -118,81 +119,74 @@ async function transcribe(
   };
 }
 
-export default async function handler(req: Request): Promise<Response> {
+function parseForm(req: VercelRequest): Promise<{ fields: Record<string, string>; filePath: string }> {
+  return new Promise((resolve, reject) => {
+    if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
+    const form = new IncomingForm({
+      uploadDir: TMP_DIR,
+      keepExtensions: true,
+      maxFileSize: 50 * 1024 * 1024,
+    });
+    form.parse(req, (err, fields, files) => {
+      if (err) return reject(err);
+      const fileField = files.file;
+      if (!fileField) return reject(new Error('Missing "file" field. Send audio as multipart form: -F "file=@audio.wav"'));
+      const file: FormidableFile = Array.isArray(fileField) ? fileField[0] : fileField;
+      const flatFields: Record<string, string> = {};
+      for (const [k, v] of Object.entries(fields)) {
+        flatFields[k] = Array.isArray(v) ? v[0] : (v ?? "");
+      }
+      resolve({ fields: flatFields, filePath: file.filepath });
+    });
+  });
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   console.log(`[inference] handler invoked: ${req.method} ${req.url}`);
 
   if (req.method !== "POST") {
-    return new Response(
-      JSON.stringify({
-        error: "Method not allowed. Use POST with multipart form (file=audio).",
-      }),
-      { status: 405, headers: { "Content-Type": "application/json" } }
-    );
+    res.status(405).json({
+      error: "Method not allowed. Use POST with multipart form (file=audio).",
+    });
+    return;
   }
 
-  let formData: FormData;
-  try {
-    formData = await req.formData();
-  } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid multipart form data" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
-  }
-
-  const file = formData.get("file");
-  if (!file || !(file instanceof File)) {
-    return new Response(
-      JSON.stringify({
-        error: 'Missing "file" field. Send audio as multipart form: -F "file=@audio.wav"',
-      }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
-  }
-
-  const temperature = parseFloat(
-    (formData.get("temperature") as string) || "0.0"
-  );
-  const responseFormat =
-    (formData.get("response_format") as string) || "json";
-  const language = (formData.get("language") as string) || "en";
-
-  if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
-  const tmpPath = join(TMP_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+  let filePath: string | undefined;
 
   try {
-    const buf = Buffer.from(await file.arrayBuffer());
-    writeFileSync(tmpPath, buf);
+    const { fields, filePath: fp } = await parseForm(req);
+    filePath = fp;
 
-    const result = await transcribe(tmpPath, {
+    const temperature = parseFloat(fields.temperature || "0.0");
+    const responseFormat = fields.response_format || "json";
+    const language = fields.language || "en";
+
+    const result = await transcribe(filePath, {
       temperature,
       language,
       response_format: responseFormat,
     });
 
     if (responseFormat === "text") {
-      return new Response(result.text, {
-        status: 200,
-        headers: { "Content-Type": "text/plain" },
-      });
+      res.setHeader("Content-Type", "text/plain");
+      res.status(200).send(result.text);
+      return;
     }
 
-    return new Response(JSON.stringify(result), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    res.status(200).json(result);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("Inference error:", message);
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    res.status(500).json({ error: message });
   } finally {
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      // best-effort cleanup
+    if (filePath) {
+      try { unlinkSync(filePath); } catch { /* best-effort cleanup */ }
     }
   }
 }
+
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
