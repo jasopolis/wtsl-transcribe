@@ -200,6 +200,12 @@ function parseForm(req: VercelRequest): Promise<{ fields: Record<string, string>
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  process.on("uncaughtException", (err) => {
+    console.error("[inference] UNCAUGHT:", err.message, err.stack);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[inference] UNHANDLED REJECTION:", reason);
+  });
   console.log(`[inference] handler invoked: ${req.method} ${req.url}`);
 
   if (req.method !== "POST") {
