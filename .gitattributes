@@ -1,0 +1,6 @@
+# Converted/quantized Whisper ggml models (Git LFS)
+models/*.bin filter=lfs diff=lfs merge=lfs -text
+
+# Prebuilt whisper.cpp Node addon + shared libraries (Git LFS) – Linux x64
+bin/whisper-addon.node filter=lfs diff=lfs merge=lfs -text
+bin/lib/*.so* filter=lfs diff=lfs merge=lfs -text

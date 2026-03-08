@@ -1,0 +1,2 @@
+# Place ggml-ipa-whisper-small-q5_0.bin here after conversion and quantization.
+# See scripts/README.md. Do not commit the binary (too large); add to .gitignore or use Vercel Blob.

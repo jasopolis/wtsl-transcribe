@@ -1,4 +1,11 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1 UV_CONCURRENT_DOWNLOADS=4 uv sync --active --no-dev"
+  "functions": {
+    "api/inference.ts": {
+      "maxDuration": 300,
+      "includeFiles": "bin/**,models/**"
+    }
+  },
+  "installCommand": "git lfs install && git lfs pull && npm install",
+  "buildCommand": "npm run build",
+  "outputDirectory": "."
 }
