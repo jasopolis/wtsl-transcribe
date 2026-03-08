@@ -11,7 +11,10 @@
  * well within Vercel's 250 MB compressed limit.
  */
 
-import { existsSync, writeFileSync, unlinkSync, mkdirSync, statSync, readdirSync } from "fs";
+import {
+  existsSync, writeFileSync, unlinkSync, mkdirSync,
+  statSync, readdirSync, readFileSync, symlinkSync, lstatSync, copyFileSync
+} from "fs";
 import { join } from "path";
 import { promisify } from "util";
 import { createRequire } from "module";
@@ -24,17 +27,65 @@ const MODEL_PATH =
   process.env.MODEL_PATH ||
   join(process.cwd(), "models", "ggml-ipa-whisper-small-q5_0.bin");
 const TMP_DIR = "/tmp/whisper-inference";
+const TMP_LIB_DIR = "/tmp/whisper-libs";
+
+/**
+ * Vercel deployments may not preserve symlinks. Recreate the expected
+ * soname symlinks in a writable /tmp directory so dlopen can resolve them.
+ */
+function ensureLibSymlinks(): string {
+  if (existsSync(TMP_LIB_DIR) && readdirSync(TMP_LIB_DIR).length > 0) {
+    return TMP_LIB_DIR;
+  }
+  mkdirSync(TMP_LIB_DIR, { recursive: true });
+
+  const entries = readdirSync(LIB_DIR);
+  console.log(`[inference] original lib dir entries: ${JSON.stringify(entries)}`);
+
+  for (const entry of entries) {
+    const fullPath = join(LIB_DIR, entry);
+    const stat = lstatSync(fullPath);
+    const destPath = join(TMP_LIB_DIR, entry);
+
+    if (stat.isSymbolicLink()) {
+      const content = readFileSync(fullPath, "utf8").trim();
+      console.log(`[inference] ${entry}: symlink-like file pointing to "${content}" (size=${stat.size})`);
+      try {
+        symlinkSync(content, destPath);
+      } catch {
+        /* already exists */
+      }
+    } else if (stat.isFile() && stat.size > 1000) {
+      try {
+        symlinkSync(fullPath, destPath);
+      } catch {
+        /* already exists */
+      }
+    } else if (stat.isFile() && stat.size < 200) {
+      // LFS pointer or broken symlink stored as file — read content as target
+      const content = readFileSync(fullPath, "utf8").trim();
+      console.log(`[inference] ${entry}: tiny file (${stat.size}b), content="${content.slice(0, 80)}"`);
+    }
+  }
+
+  console.log(`[inference] tmp lib dir: ${JSON.stringify(readdirSync(TMP_LIB_DIR))}`);
+  return TMP_LIB_DIR;
+}
 
 function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, result?: unknown) => void) => void {
   console.log(`[inference] loadAddon: BIN_DIR=${BIN_DIR}, LIB_DIR=${LIB_DIR}`);
   if (!existsSync(LIB_DIR)) {
     throw new Error(`Shared libraries not found at ${LIB_DIR}. Run: npm run build`);
   }
+
+  const libDir = ensureLibSymlinks();
+
   const sep = ":";
   const current = process.env.LD_LIBRARY_PATH || "";
-  if (!current.split(sep).includes(LIB_DIR)) {
-    process.env.LD_LIBRARY_PATH = LIB_DIR + (current ? sep + current : "");
-  }
+  const dirs = current ? current.split(sep) : [];
+  if (!dirs.includes(libDir)) dirs.unshift(libDir);
+  if (!dirs.includes(LIB_DIR)) dirs.unshift(LIB_DIR);
+  process.env.LD_LIBRARY_PATH = dirs.join(sep);
   console.log(`[inference] LD_LIBRARY_PATH=${process.env.LD_LIBRARY_PATH}`);
 
   const addonPath = join(BIN_DIR, "whisper-addon.node");
@@ -46,8 +97,6 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
 
   const addonSize = statSync(addonPath).size;
   console.log(`[inference] addon file size: ${addonSize} bytes`);
-  const libFiles = readdirSync(LIB_DIR);
-  console.log(`[inference] lib dir contents: ${JSON.stringify(libFiles)}`);
 
   console.log(`[inference] loading addon via require()...`);
   const require_ = createRequire(__filename);
