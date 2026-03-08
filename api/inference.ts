@@ -86,6 +86,9 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
 
   const libDir = ensureLibDir();
 
+  // Ensure LD_LIBRARY_PATH includes both the tmp dir (with soname aliases)
+  // and the original lib dir. The env var may already be set by Vercel project
+  // settings, but we prepend the tmp dir to pick up recreated aliases.
   const sep = ":";
   const current = process.env.LD_LIBRARY_PATH || "";
   const dirs = current ? current.split(sep) : [];
