@@ -4,47 +4,73 @@
 
 ### Overview
 
-**wtsl-transcribe** is a speech-to-IPA transcription service. It wraps a whisper.cpp inference server with a fine-tuned IPA model and exposes a `POST /inference` endpoint.
+**wtsl-transcribe** is a speech-to-IPA transcription service. It uses whisper.cpp's
+native Node.js addon with a fine-tuned IPA model and exposes a `POST /inference`
+Vercel serverless endpoint.  Inference runs in-process — no child-process server
+or TCP proxy is needed.
 
 ### Architecture
 
-- **`bin/whisper-server`** — prebuilt native binary (Git LFS). Currently ARM aarch64; an x86_64 build is pending.
+- **`bin/whisper-addon.node`** — prebuilt N-API addon compiled from the
+  `whisper.cpp/examples/addon.node` reference implementation (Git LFS, Linux x64).
+- **`bin/lib/`** — shared libraries (`libwhisper.so`, `libggml*.so`) required
+  by the addon (Git LFS).
 - **`models/ggml-ipa-whisper-small-q5_0.bin`** — quantized GGML model (~168 MB, Git LFS).
-- **`api/inference.ts`** — Vercel serverless function that spawns the binary and proxies requests.
-- **`whisper.cpp/`** — git submodule (only needed if building the binary from source).
+- **`api/inference.ts`** — Vercel serverless function that loads the addon and
+  runs whisper.cpp inference in-process.
+- **`whisper.cpp/`** — git submodule (only needed when building the addon from source).
 
-### Running the server (local dev)
+### Building the addon
 
-The server needs two things: the native binary and the model file. Both are tracked via Git LFS.
+The addon is pre-built for Linux x64 and committed via Git LFS.  To rebuild:
 
 ```bash
-# If using the prebuilt binary (after x86_64 version is committed):
-./scripts/run-server.sh
-# Listens on http://0.0.0.0:8080
-
-# If building from source instead:
+# Requires: cmake, g++, libstdc++-13-dev, node-addon-api (installed automatically)
 git submodule update --init
-./scripts/build-server.sh
-./scripts/run-server.sh
+./scripts/build-addon.sh
+# Output: bin/whisper-addon.node + bin/lib/*.so
 ```
 
-Building from source requires `cmake`, a C++17 toolchain, and `libstdc++-13-dev`.
-
-### Testing inference
+### Running locally (dev)
 
 ```bash
-curl -X POST http://127.0.0.1:8080/inference \
+# Pull LFS files (model + addon binary):
+git lfs pull
+
+# Quick test with Node directly:
+LD_LIBRARY_PATH=bin/lib node -e "
+  const { whisper } = require('./bin/whisper-addon.node');
+  const { promisify } = require('util');
+  promisify(whisper)({
+    model: 'models/ggml-ipa-whisper-small-q5_0.bin',
+    fname_inp: 'input.wav',
+    language: 'en',
+    use_gpu: false,
+    no_prints: true,
+  }).then(r => console.log(JSON.stringify(r, null, 2)));
+"
+```
+
+### Testing inference (via Vercel dev or deployed)
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/inference \
   -F "file=@input.wav" \
   -F "temperature=0.0" \
   -F "response_format=json"
 ```
 
-Use 16 kHz mono WAV for best results. Install `ffmpeg` for automatic format conversion via `--convert`.
+Use 16 kHz mono WAV for best results.
 
 ### Key caveats
 
-- **Git LFS is required.** Without `git lfs pull`, `models/*.bin` and `bin/whisper-server` are tiny pointer files, not usable binaries.
-- **Binary architecture:** The committed `bin/whisper-server` is ARM aarch64. Cloud VMs are x86_64, so the prebuilt binary cannot run directly. Either build from source (`./scripts/build-server.sh`) or wait for an x86_64 binary to be committed.
-- **Node.js version:** `package.json` requires `^24.13.0`. Use `nvm install 24` to get the right version.
-- **No tsconfig.json** in the repo. TypeScript is used only for the Vercel function; type-check with: `npx -p typescript tsc --noEmit --esModuleInterop --module nodenext --moduleResolution nodenext --target esnext api/inference.ts`
+- **Git LFS is required.** Without `git lfs pull`, model and addon files are
+  tiny pointer files.
+- **Binary architecture:** The committed addon is built for Linux x64.  To
+  rebuild for a different platform, run `./scripts/build-addon.sh`.
+- **Node.js version:** `>=20.0.0`.  The addon uses N-API (ABI-stable across
+  Node versions).
+- **No tsconfig.json** in the repo. TypeScript is used only for the Vercel
+  function; type-check with:
+  `npx -p typescript tsc --noEmit --esModuleInterop --module nodenext --moduleResolution nodenext --target esnext api/inference.ts`
 - **No linter or test framework** is configured in this repo.

@@ -1,13 +1,14 @@
 {
   "name": "wtsl-transcribe",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
-    "build": "bash scripts/build-server.sh --for-deploy",
+    "build": "bash scripts/build-addon.sh --for-deploy",
+    "build:addon": "bash scripts/build-addon.sh",
     "vercel-build": "npm run build"
   },
   "engines": {
-    "node": "^24.13.0"
+    "node": ">=20.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

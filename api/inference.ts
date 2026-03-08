@@ -1,179 +1,184 @@
 /**
- * Vercel serverless function: runs bundled whisper-server (CPU-only prebuilt)
- * and proxies POST /inference to it. Stays within 250MB bundle, 1GB memory.
+ * Vercel serverless function: transcribes audio via whisper.cpp Node addon.
+ *
+ * Loads the native addon (bin/whisper-addon.node) and runs inference in-process
+ * — no child-process server, no TCP proxy.  The GGML model is loaded once per
+ * cold-start and reused across warm invocations (whisper.cpp caches internally
+ * within the addon's whisper_init_from_file_with_params call per invocation,
+ * but the .node shared object stays loaded in the V8 process).
+ *
+ * Bundle budget:  addon (~800 KB) + libs (~2.6 MB) + model (~168 MB) ≈ 172 MB
+ * well within Vercel's 250 MB compressed limit.
  */
 
-import { existsSync, mkdirSync } from "fs";
-import { createServer, createConnection } from "net";
+import { existsSync, writeFileSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
-import { spawn, type ChildProcess } from "child_process";
+import { promisify } from "util";
+import { createRequire } from "module";
 
 const BIN_DIR = process.env.BIN_DIR || join(process.cwd(), "bin");
+const LIB_DIR = process.env.LIB_DIR || join(BIN_DIR, "lib");
 const MODEL_PATH =
   process.env.MODEL_PATH ||
   join(process.cwd(), "models", "ggml-ipa-whisper-small-q5_0.bin");
+const TMP_DIR = "/tmp/whisper-inference";
 
-let serverProcess: ChildProcess | null = null;
-let serverPort: number | null = null;
+function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, result?: unknown) => void) => void {
+  if (!existsSync(LIB_DIR)) {
+    throw new Error(`Shared libraries not found at ${LIB_DIR}. Run: npm run build`);
+  }
+  // Prepend LIB_DIR so the dynamic linker finds libwhisper / libggml at dlopen time
+  const sep = ":";
+  const current = process.env.LD_LIBRARY_PATH || "";
+  if (!current.split(sep).includes(LIB_DIR)) {
+    process.env.LD_LIBRARY_PATH = LIB_DIR + (current ? sep + current : "");
+  }
 
-function getBinPath(): string {
-  const bin = join(BIN_DIR, "whisper-server");
-  if (!existsSync(bin)) {
+  const addonPath = join(BIN_DIR, "whisper-addon.node");
+  if (!existsSync(addonPath)) {
     throw new Error(
-      `whisper-server not found at ${bin}. Run npm run build (or ensure bin/ is deployed).`
+      `whisper-addon.node not found at ${addonPath}. Run: npm run build`
     );
   }
-  return bin;
+
+  const require_ = createRequire(__filename);
+  const { whisper } = require_(addonPath);
+  return whisper;
+}
+
+let whisperFn: ReturnType<typeof loadAddon> | null = null;
+
+function getWhisper() {
+  if (!whisperFn) whisperFn = loadAddon();
+  return whisperFn;
 }
 
 function ensureModel(): string {
   if (!existsSync(MODEL_PATH)) {
     throw new Error(
-      `Model not found at ${MODEL_PATH}. Add the model to models/ or set MODEL_PATH.`
+      `Model not found at ${MODEL_PATH}. Add it to models/ or set MODEL_PATH.`
     );
   }
   return MODEL_PATH;
 }
 
-function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.listen(0, "127.0.0.1", () => {
-      const port = (s.address() as { port: number }).port;
-      s.close(() => resolve(port));
-    });
-    s.on("error", reject);
-  });
+interface WhisperSegment {
+  start: string;
+  end: string;
+  text: string;
 }
 
-function startServer(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    if (serverPort !== null && serverProcess?.exitCode === null) {
-      return resolve(serverPort);
-    }
-    const bin = getBinPath();
-    const model = ensureModel();
-    // Vercel: filesystem is read-only except /tmp (see vercel.com/docs/functions/runtimes#file-system-support)
-    const tmpDir = "/tmp/whisper-inference";
-    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-
-    getFreePort()
-      .then((port) => {
-        const proc = spawn(
-          bin,
-          [
-            "-m",
-            model,
-            "--host",
-            "127.0.0.1",
-            "--port",
-            String(port),
-            "-l",
-            "en",
-            // no --convert: no ffmpeg in bundle; client should send WAV
-          ],
-          {
-            cwd: process.cwd(),
-            env: { ...process.env, TMPDIR: tmpDir },
-            stdio: ["ignore", "pipe", "pipe"],
-          }
-        );
-        serverProcess = proc;
-        serverPort = port;
-
-        let stderr = "";
-        let settled = false;
-        const doReject = (err: Error) => {
-          if (settled) return;
-          settled = true;
-          reject(err);
-        };
-        const doResolve = (p: number) => {
-          if (settled) return;
-          settled = true;
-          resolve(p);
-        };
-        proc.stderr?.on("data", (c) => (stderr += c.toString()));
-        proc.on("error", (err) => doReject(err));
-        proc.on("exit", (code) => {
-          serverProcess = null;
-          serverPort = null;
-          if (code !== 0 && code !== null) {
-            console.error("whisper-server stderr:", stderr);
-            const hint = stderr.includes("cannot execute binary file")
-              ? " Binary must be Linux x86_64 for Vercel. Build with: ./scripts/build-server-linux.sh"
-              : "";
-            doReject(new Error(`whisper-server exited ${code}: ${stderr.trim()}${hint}`));
-          }
-        });
-
-        // Wait for server to accept TCP connections
-        const deadline = Date.now() + 60000;
-        const tryConnect = () => {
-          if (settled) return;
-          const sock = createConnection(
-            { host: "127.0.0.1", port },
-            () => {
-              sock.destroy();
-              doResolve(port);
-            }
-          );
-          sock.on("error", () => {
-            if (settled) return;
-            if (Date.now() < deadline) setTimeout(tryConnect, 200);
-            else doReject(new Error("whisper-server failed to start"));
-          });
-        };
-        setTimeout(tryConnect, 500);
-      })
-      .catch(reject);
-  });
+interface WhisperResult {
+  transcription: [string, string, string][];
+  language?: string;
 }
 
-async function waitForServer(port: number): Promise<void> {
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/`);
-      if (r.ok) return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 300));
-    }
-  }
-  throw new Error("whisper-server did not become ready");
+async function transcribe(
+  audioPath: string,
+  opts: {
+    temperature?: number;
+    language?: string;
+    response_format?: string;
+  } = {}
+): Promise<{ segments: WhisperSegment[]; text: string; language?: string }> {
+  const whisper = getWhisper();
+  const whisperAsync = promisify(whisper);
+  const model = ensureModel();
+
+  const result = (await whisperAsync({
+    model,
+    fname_inp: audioPath,
+    language: opts.language || "en",
+    use_gpu: false,
+    no_prints: true,
+    no_timestamps: false,
+    comma_in_time: false,
+  })) as WhisperResult;
+
+  const segments: WhisperSegment[] = (result.transcription || []).map(
+    ([start, end, text]) => ({ start, end, text: text.trim() })
+  );
+
+  return {
+    segments,
+    text: segments.map((s) => s.text).join(" "),
+    ...(result.language ? { language: result.language } : {}),
+  };
 }
 
-export default async function handler(
-  req: Request
-): Promise<Response> {
+export default async function handler(req: Request): Promise<Response> {
   if (req.method !== "POST") {
     return new Response(
-      JSON.stringify({ error: "Method not allowed. Use POST with multipart form (file=audio)." }),
+      JSON.stringify({
+        error: "Method not allowed. Use POST with multipart form (file=audio).",
+      }),
       { status: 405, headers: { "Content-Type": "application/json" } }
     );
   }
 
-  const port = await startServer();
-  await waitForServer(port);
-
-  const contentType = req.headers.get("content-type") || "";
-  const body = req.body;
-  if (!body) {
+  let formData: FormData;
+  try {
+    formData = await req.formData();
+  } catch {
     return new Response(
-      JSON.stringify({ error: "No request body" }),
+      JSON.stringify({ error: "Invalid multipart form data" }),
       { status: 400, headers: { "Content-Type": "application/json" } }
     );
   }
 
-  const backendUrl = `http://127.0.0.1:${port}/inference`;
-  const proxyReq = new Request(backendUrl, {
-    method: "POST",
-    headers: { "Content-Type": contentType },
-    body,
-    duplex: "half",
-  } as RequestInit);
-  const res = await fetch(proxyReq);
-  const outHeaders = new Headers();
-  res.headers.forEach((v, k) => outHeaders.set(k, v));
-  return new Response(res.body, { status: res.status, headers: outHeaders });
+  const file = formData.get("file");
+  if (!file || !(file instanceof File)) {
+    return new Response(
+      JSON.stringify({
+        error: 'Missing "file" field. Send audio as multipart form: -F "file=@audio.wav"',
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const temperature = parseFloat(
+    (formData.get("temperature") as string) || "0.0"
+  );
+  const responseFormat =
+    (formData.get("response_format") as string) || "json";
+  const language = (formData.get("language") as string) || "en";
+
+  if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
+  const tmpPath = join(TMP_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+
+  try {
+    const buf = Buffer.from(await file.arrayBuffer());
+    writeFileSync(tmpPath, buf);
+
+    const result = await transcribe(tmpPath, {
+      temperature,
+      language,
+      response_format: responseFormat,
+    });
+
+    if (responseFormat === "text") {
+      return new Response(result.text, {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
+
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Inference error:", message);
+    return new Response(JSON.stringify({ error: message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  } finally {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup
+    }
+  }
 }

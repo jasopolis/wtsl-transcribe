@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/inference.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "bin/**,models/**"
     }
   },
   "installCommand": "git lfs install && git lfs pull && npm install",
