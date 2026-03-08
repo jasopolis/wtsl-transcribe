@@ -1,5 +1,12 @@
 /**
  * Vercel serverless function: transcribes audio via whisper.cpp Node addon.
+ *
+ * Loads the native addon (bin/whisper-addon.node) and runs inference in-process
+ * — no child-process server, no TCP proxy.  The GGML model is loaded once per
+ * cold-start and reused across warm invocations.
+ *
+ * Bundle budget:  addon (~800 KB) + libs (~2.6 MB) + model (~168 MB) ≈ 172 MB
+ * well within Vercel's 250 MB compressed limit.
  */
 
 import {
@@ -19,6 +26,11 @@ const MODEL_PATH =
 const TMP_DIR = "/tmp/whisper-inference";
 const TMP_LIB_DIR = "/tmp/whisper-libs";
 
+/**
+ * Vercel deployments don't preserve filesystem symlinks. The dynamic linker
+ * expects soname aliases (e.g. libwhisper.so.1 -> libwhisper.so.1.8.3).
+ * Recreate those aliases in a writable /tmp directory.
+ */
 const SONAME_MAP: Record<string, string> = {
   "libwhisper.so.1":   "libwhisper.so.1.8.3",
   "libwhisper.so":     "libwhisper.so.1.8.3",
@@ -55,7 +67,6 @@ function ensureLibDir(): string {
 }
 
 function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, result?: unknown) => void) => void {
-  console.log("[inference] loadAddon called");
   if (!existsSync(LIB_DIR)) {
     throw new Error(`Shared libraries not found at ${LIB_DIR}. Run: npm run build`);
   }
@@ -71,16 +82,9 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
   if (!existsSync(addonPath)) {
     throw new Error(`whisper-addon.node not found at ${addonPath}. Run: npm run build`);
   }
-  console.log(`[inference] addon size: ${statSync(addonPath).size}, loading...`);
   const require_ = createRequire(__filename);
-  try {
-    const { whisper } = require_(addonPath);
-    console.log("[inference] addon loaded OK");
-    return whisper;
-  } catch (err) {
-    console.error("[inference] addon load FAILED:", err);
-    throw err;
-  }
+  const { whisper } = require_(addonPath);
+  return whisper;
 }
 
 let whisperFn: ReturnType<typeof loadAddon> | null = null;
@@ -95,9 +99,7 @@ interface WhisperResult {
 }
 
 async function transcribe(audioPath: string, opts: { language?: string } = {}) {
-  console.log("[inference] transcribe() starting");
   const whisper = getWhisper();
-  console.log("[inference] whisper function obtained");
   const whisperAsync = promisify(whisper);
   if (!existsSync(MODEL_PATH)) throw new Error(`Model not found at ${MODEL_PATH}`);
 
@@ -140,13 +142,13 @@ function parseMultipartBuffer(buf: Buffer, boundary: string): { file?: Buffer; f
     const start = buf.indexOf(sep, pos);
     if (start === -1) break;
     const partStart = start + sep.length;
-    if (buf[partStart] === 0x2d && buf[partStart + 1] === 0x2d) break; // --
+    if (buf[partStart] === 0x2d && buf[partStart + 1] === 0x2d) break;
     const headerEnd = buf.indexOf(Buffer.from("\r\n\r\n"), partStart);
     if (headerEnd === -1) break;
     const headers = buf.subarray(partStart + 2, headerEnd).toString("utf8");
     const bodyStart = headerEnd + 4;
     const nextSep = buf.indexOf(sep, bodyStart);
-    const bodyEnd = nextSep === -1 ? buf.length : nextSep - 2; // strip \r\n before next boundary
+    const bodyEnd = nextSep === -1 ? buf.length : nextSep - 2;
     const body = buf.subarray(bodyStart, bodyEnd);
 
     const nameMatch = headers.match(/name="([^"]+)"/);
@@ -171,23 +173,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   let tmpPath: string | undefined;
   try {
-    // Try reading from the raw body that Vercel's body parser may have stored
     let rawBody: Buffer;
     if (Buffer.isBuffer(req.body)) {
       rawBody = req.body;
     } else if (typeof req.body === "string") {
       rawBody = Buffer.from(req.body, "binary");
     } else {
-      // Body parser couldn't parse multipart; body is undefined but
-      // the raw bytes may still be available via (req as any).rawBody
       const raw = (req as unknown as { rawBody?: Buffer }).rawBody;
-      if (Buffer.isBuffer(raw)) {
-        rawBody = raw;
-      } else {
-        rawBody = await collectBody(req);
-      }
+      rawBody = Buffer.isBuffer(raw) ? raw : await collectBody(req);
     }
-    console.log(`[inference] body: ${rawBody.length} bytes`);
+
     const contentType = req.headers["content-type"] || "";
     const boundaryMatch = contentType.match(/boundary=(.+)/);
     if (!boundaryMatch) {
