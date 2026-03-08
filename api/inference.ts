@@ -29,46 +29,52 @@ const MODEL_PATH =
 const TMP_DIR = "/tmp/whisper-inference";
 const TMP_LIB_DIR = "/tmp/whisper-libs";
 
+const SONAME_MAP: Record<string, string> = {
+  "libwhisper.so.1":   "libwhisper.so.1.8.3",
+  "libwhisper.so":     "libwhisper.so.1.8.3",
+  "libggml.so.0":      "libggml.so.0.9.6",
+  "libggml.so":        "libggml.so.0.9.6",
+  "libggml-base.so.0": "libggml-base.so.0.9.6",
+  "libggml-base.so":   "libggml-base.so.0.9.6",
+  "libggml-cpu.so.0":  "libggml-cpu.so.0.9.6",
+  "libggml-cpu.so":    "libggml-cpu.so.0.9.6",
+};
+
 /**
- * Vercel deployments may not preserve symlinks. Recreate the expected
- * soname symlinks in a writable /tmp directory so dlopen can resolve them.
+ * Vercel deployments don't preserve symlinks. The linker expects soname
+ * aliases (e.g. libwhisper.so.1). We copy the real versioned .so into
+ * a writable /tmp dir under every expected alias.
  */
-function ensureLibSymlinks(): string {
+function ensureLibDir(): string {
   if (existsSync(TMP_LIB_DIR) && readdirSync(TMP_LIB_DIR).length > 0) {
     return TMP_LIB_DIR;
   }
   mkdirSync(TMP_LIB_DIR, { recursive: true });
 
   const entries = readdirSync(LIB_DIR);
-  console.log(`[inference] original lib dir entries: ${JSON.stringify(entries)}`);
+  const diag: string[] = [];
 
   for (const entry of entries) {
     const fullPath = join(LIB_DIR, entry);
     const stat = lstatSync(fullPath);
-    const destPath = join(TMP_LIB_DIR, entry);
+    diag.push(`${entry}:${stat.size}:${stat.isSymbolicLink() ? "sym" : "file"}`);
 
-    if (stat.isSymbolicLink()) {
-      const content = readFileSync(fullPath, "utf8").trim();
-      console.log(`[inference] ${entry}: symlink-like file pointing to "${content}" (size=${stat.size})`);
-      try {
-        symlinkSync(content, destPath);
-      } catch {
-        /* already exists */
-      }
-    } else if (stat.isFile() && stat.size > 1000) {
-      try {
-        symlinkSync(fullPath, destPath);
-      } catch {
-        /* already exists */
-      }
-    } else if (stat.isFile() && stat.size < 200) {
-      // LFS pointer or broken symlink stored as file — read content as target
-      const content = readFileSync(fullPath, "utf8").trim();
-      console.log(`[inference] ${entry}: tiny file (${stat.size}b), content="${content.slice(0, 80)}"`);
+    if (stat.isFile() && stat.size > 1000) {
+      const dest = join(TMP_LIB_DIR, entry);
+      if (!existsSync(dest)) symlinkSync(fullPath, dest);
     }
   }
 
-  console.log(`[inference] tmp lib dir: ${JSON.stringify(readdirSync(TMP_LIB_DIR))}`);
+  for (const [alias, target] of Object.entries(SONAME_MAP)) {
+    const dest = join(TMP_LIB_DIR, alias);
+    const realFile = join(LIB_DIR, target);
+    if (!existsSync(dest) && existsSync(realFile)) {
+      symlinkSync(realFile, dest);
+    }
+  }
+
+  console.log(`[inference] lib diag: ${diag.join(", ")}`);
+  console.log(`[inference] tmp lib: ${JSON.stringify(readdirSync(TMP_LIB_DIR))}`);
   return TMP_LIB_DIR;
 }
 
@@ -78,7 +84,7 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
     throw new Error(`Shared libraries not found at ${LIB_DIR}. Run: npm run build`);
   }
 
-  const libDir = ensureLibSymlinks();
+  const libDir = ensureLibDir();
 
   const sep = ":";
   const current = process.env.LD_LIBRARY_PATH || "";
@@ -225,8 +231,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     res.status(200).json(result);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
     console.error("Inference error:", message);
-    res.status(500).json({ error: message });
+    res.status(500).json({ error: message, stack, cwd: process.cwd() });
   } finally {
     if (filePath) {
       try { unlinkSync(filePath); } catch { /* best-effort cleanup */ }
