@@ -119,7 +119,7 @@ async function transcribe(
 }
 
 export default async function handler(req: Request): Promise<Response> {
-  console.log(`[inference] handler invoked: ${req.method} ${new URL(req.url).pathname}`);
+  console.log(`[inference] handler invoked: ${req.method} ${req.url}`);
 
   if (req.method !== "POST") {
     return new Response(
