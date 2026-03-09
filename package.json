@@ -5,7 +5,8 @@
   "scripts": {
     "build": "bash scripts/build-addon.sh --for-deploy",
     "build:addon": "bash scripts/build-addon.sh",
-    "vercel-build": "npm run build"
+    "vercel-build": "npm run build",
+    "benchmark:preview": "node scripts/benchmark-preview.mjs"
   },
   "engines": {
     "node": ">=20.0.0"
