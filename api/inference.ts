@@ -88,8 +88,19 @@ function loadAddon(): (params: Record<string, unknown>, cb: (err: Error | null, 
 }
 
 let whisperFn: ReturnType<typeof loadAddon> | null = null;
+let lastAddonLoadMs = 0;
+let invocationCount = 0;
+
+function nowMs(): number {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
 function getWhisper() {
-  if (!whisperFn) whisperFn = loadAddon();
+  if (!whisperFn) {
+    const start = nowMs();
+    whisperFn = loadAddon();
+    lastAddonLoadMs = nowMs() - start;
+  }
   return whisperFn;
 }
 
@@ -165,6 +176,34 @@ function parseMultipartBuffer(buf: Buffer, boundary: string): { file?: Buffer; f
   return { file: fileData, fields };
 }
 
+type BenchmarkBreakdown = {
+  cold_start: boolean;
+  invocation_number: number;
+  addon_loaded_this_request: boolean;
+  addon_load_ms: number;
+  body_collect_ms: number;
+  multipart_parse_ms: number;
+  temp_write_ms: number;
+  transcribe_ms: number;
+  cleanup_ms: number;
+  total_ms: number;
+  audio_bytes: number;
+};
+
+function setBenchmarkHeaders(res: VercelResponse, benchmark: BenchmarkBreakdown): void {
+  res.setHeader("X-Cold-Start", String(benchmark.cold_start));
+  res.setHeader("X-Invocation-Number", String(benchmark.invocation_number));
+  res.setHeader("X-Addon-Loaded-This-Request", String(benchmark.addon_loaded_this_request));
+  res.setHeader("X-Benchmark-Addon-Load-Ms", benchmark.addon_load_ms.toFixed(2));
+  res.setHeader("X-Benchmark-Body-Collect-Ms", benchmark.body_collect_ms.toFixed(2));
+  res.setHeader("X-Benchmark-Multipart-Parse-Ms", benchmark.multipart_parse_ms.toFixed(2));
+  res.setHeader("X-Benchmark-Temp-Write-Ms", benchmark.temp_write_ms.toFixed(2));
+  res.setHeader("X-Benchmark-Transcribe-Ms", benchmark.transcribe_ms.toFixed(2));
+  res.setHeader("X-Benchmark-Cleanup-Ms", benchmark.cleanup_ms.toFixed(2));
+  res.setHeader("X-Benchmark-Total-Ms", benchmark.total_ms.toFixed(2));
+  res.setHeader("X-Benchmark-Audio-Bytes", String(benchmark.audio_bytes));
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed. Use POST with multipart form (file=audio)." });
@@ -172,7 +211,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   let tmpPath: string | undefined;
+  let cleanupMs = 0;
+  let bodyCollectMs = 0;
+  let multipartParseMs = 0;
+  let tempWriteMs = 0;
+  let transcribeMs = 0;
+  let audioBytes = 0;
+  const requestStart = nowMs();
+  const isColdStart = invocationCount === 0;
+  invocationCount += 1;
   try {
+    const bodyCollectStart = nowMs();
     let rawBody: Buffer;
     if (Buffer.isBuffer(req.body)) {
       rawBody = req.body;
@@ -182,7 +231,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const raw = (req as unknown as { rawBody?: Buffer }).rawBody;
       rawBody = Buffer.isBuffer(raw) ? raw : await collectBody(req);
     }
+    bodyCollectMs = nowMs() - bodyCollectStart;
 
+    const multipartParseStart = nowMs();
     const contentType = req.headers["content-type"] || "";
     const boundaryMatch = contentType.match(/boundary=(.+)/);
     if (!boundaryMatch) {
@@ -190,26 +241,65 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
     const { file, fields } = parseMultipartBuffer(rawBody, boundaryMatch[1]);
+    multipartParseMs = nowMs() - multipartParseStart;
     if (!file || file.length === 0) {
       res.status(400).json({ error: 'Missing "file" field. Send audio as: -F "file=@audio.wav"' });
       return;
     }
+    audioBytes = file.length;
 
+    const tempWriteStart = nowMs();
     if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
     tmpPath = join(TMP_DIR, `${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
     writeFileSync(tmpPath, file);
+    tempWriteMs = nowMs() - tempWriteStart;
 
     const language = fields.language || "en";
     const responseFormat = fields.response_format || "json";
+    const includeBenchmark =
+      fields.benchmark === "1" ||
+      fields.benchmark === "true" ||
+      fields.include_benchmark === "1" ||
+      fields.include_benchmark === "true";
+    const addonLoadedThisRequest = !whisperFn;
 
+    const transcribeStart = nowMs();
     const result = await transcribe(tmpPath, { language });
+    transcribeMs = nowMs() - transcribeStart;
+
+    const cleanupStart = nowMs();
+    if (tmpPath) {
+      try {
+        unlinkSync(tmpPath);
+        tmpPath = undefined;
+      } catch {
+        // Best effort cleanup.
+      }
+    }
+    cleanupMs = nowMs() - cleanupStart;
+
+    const benchmark: BenchmarkBreakdown = {
+      cold_start: isColdStart,
+      invocation_number: invocationCount,
+      addon_loaded_this_request: addonLoadedThisRequest,
+      addon_load_ms: addonLoadedThisRequest ? lastAddonLoadMs : 0,
+      body_collect_ms: bodyCollectMs,
+      multipart_parse_ms: multipartParseMs,
+      temp_write_ms: tempWriteMs,
+      transcribe_ms: transcribeMs,
+      cleanup_ms: cleanupMs,
+      total_ms: nowMs() - requestStart,
+      audio_bytes: audioBytes,
+    };
+    setBenchmarkHeaders(res, benchmark);
+    console.log("[benchmark] /api/inference", JSON.stringify(benchmark));
 
     if (responseFormat === "text") {
       res.setHeader("Content-Type", "text/plain");
       res.status(200).send(result.text);
       return;
     }
-    res.status(200).json(result);
+    res.status(200).json(includeBenchmark ? { ...result, benchmark } : result);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("Inference error:", message);
